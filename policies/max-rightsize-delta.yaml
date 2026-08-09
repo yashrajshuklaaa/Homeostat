@@ -1,0 +1,35 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: max-rightsize-delta
+  annotations:
+    policies.kyverno.io/title: Block oversized rightsizing changes
+    policies.kyverno.io/category: Homeostat
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Blocks any HomeostatRecommendation proposing a resource change over
+      30% of current requests. This is the core safety net that lets
+      rightsizing run unattended - agents can propose whatever they want,
+      only small, low-risk changes get auto-applied.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: block-large-resource-swings
+      match:
+        any:
+          - resources:
+              kinds:
+                - homeostat.dev/v1alpha1/HomeostatRecommendation
+      validate:
+        message: >-
+          Rejected: proposed change exceeds the 30% safety threshold.
+          Route this one through manual review instead.
+        foreach:
+          - list: request.object.spec.resourceDeltas
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.deltaPercent }}"
+                    operator: GreaterThan
+                    value: 30
