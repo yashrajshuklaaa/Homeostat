@@ -1,3 +1,6 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Homeostat logo" width="220">
+</p>
 # Homeostat
 
 **The cluster that regulates itself.**
