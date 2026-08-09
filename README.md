@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Homeostat logo" width="340">
+  <img src="assets/logo.png" alt="Homeostat logo" width="440">
 </p>
 
 <h1 align="center">Homeostat</h1>
