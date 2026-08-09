@@ -1,0 +1,81 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: homeostatrecommendations.homeostat.dev
+spec:
+  group: homeostat.dev
+  names:
+    kind: HomeostatRecommendation
+    listKind: HomeostatRecommendationList
+    plural: homeostatrecommendations
+    singular: homeostatrecommendation
+    shortNames: [hrec]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Target
+          type: string
+          jsonPath: .spec.target.name
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              required: [target, agentName, reason, resourceDeltas]
+              properties:
+                target:
+                  type: object
+                  required: [apiVersion, kind, name, namespace]
+                  properties:
+                    apiVersion: { type: string }
+                    kind: { type: string }
+                    name: { type: string }
+                    namespace: { type: string }
+                agentName: { type: string }
+                reason: { type: string }
+                requiresLabels:
+                  type: object
+                  additionalProperties: { type: string }
+                resourceDeltas:
+                  type: array
+                  items:
+                    type: object
+                    required: [container, proposedRequests, deltaPercent]
+                    properties:
+                      container: { type: string }
+                      currentRequests:
+                        type: object
+                        additionalProperties: { type: string }
+                      proposedRequests:
+                        type: object
+                        additionalProperties: { type: string }
+                      deltaPercent:
+                        type: integer
+                        minimum: 0
+                        maximum: 1000
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: [Pending, Admitted, Blocked, Applied, Failed]
+                message: { type: string }
+                observedGeneration: { type: integer }
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
