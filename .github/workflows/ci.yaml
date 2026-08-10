@@ -27,12 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: install kyverno cli
-        run: |
-          curl -sL https://github.com/kyverno/kyverno/releases/latest/download/kyverno-cli_linux_x86_64.tar.gz | tar xz
-          sudo mv kyverno /usr/local/bin/
+      - uses: kyverno/action-install-cli@v0.2.0
+        with:
+          release: 'v1.12.5'
       - name: lint policies
         run: |
           for f in policies/*.yaml; do
+            echo "checking $f"
             kyverno apply "$f" --resource "$f" --dry-run || true
           done
