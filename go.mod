@@ -1,4 +1,4 @@
-module github.com/YOUR_USERNAME/homeostat
+module github.com/yashrajshuklaaa/homeostat
 
 go 1.22.0
 
