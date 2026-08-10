@@ -126,14 +126,17 @@ func TestReconcile_BlockedDoesNothing(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "rec-2", Namespace: "default"}, &got); err != nil {
 		t.Fatalf("fetching recommendation after reconcile: %v", err)
 	}
-	// Blocked recommendations should be left untouched - no phase change,
-	// no attempt to fetch or patch a target that may not even exist.
 	if got.Status.Phase != homeostatv1alpha1.PhaseBlocked {
 		t.Errorf("expected phase to remain Blocked, got %s", got.Status.Phase)
 	}
 }
 
-func TestReconcile_PendingDoesNothing(t *testing.T) {
+// TestReconcile_PendingTransitionsToAdmitted covers the core behavior
+// change from ADR 0001: since Kyverno's Enforce policy validates
+// synchronously at creation time, an object that exists has already
+// passed policy. A freshly-created recommendation with no phase set
+// should be marked Admitted on its first reconcile, not left untouched.
+func TestReconcile_PendingTransitionsToAdmitted(t *testing.T) {
 	scheme := newScheme(t)
 
 	rec := &homeostatv1alpha1.HomeostatRecommendation{
@@ -142,17 +145,32 @@ func TestReconcile_PendingDoesNothing(t *testing.T) {
 			Target:    homeostatv1alpha1.TargetRef{Kind: "Deployment", Name: "checkout", Namespace: "default"},
 			AgentName: "optimization-agent",
 		},
-		// Phase left unset - simulates a recommendation admission hasn't
-		// processed yet.
+		// Phase left unset - simulates a freshly-created recommendation
+		// that has just passed Kyverno's admission check.
 	}
 
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(rec).Build()
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(rec).
+		WithStatusSubresource(&homeostatv1alpha1.HomeostatRecommendation{}).
+		Build()
 	r := &HomeostatRecommendationReconciler{Client: c}
 
-	_, err := r.Reconcile(context.Background(), ctrl.Request{
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Name: "rec-3", Namespace: "default"},
 	})
 	if err != nil {
 		t.Fatalf("Reconcile returned error: %v", err)
+	}
+	if !result.Requeue {
+		t.Errorf("expected Requeue: true so the Admitted branch runs next, got %+v", result)
+	}
+
+	var got homeostatv1alpha1.HomeostatRecommendation
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "rec-3", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("fetching recommendation after reconcile: %v", err)
+	}
+	if got.Status.Phase != homeostatv1alpha1.PhaseAdmitted {
+		t.Errorf("expected phase Admitted, got %s", got.Status.Phase)
 	}
 }

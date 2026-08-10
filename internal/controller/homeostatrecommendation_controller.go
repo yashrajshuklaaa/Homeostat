@@ -17,9 +17,13 @@ import (
 
 // HomeostatRecommendationReconciler watches HomeostatRecommendation objects.
 //
-// It doesn't decide whether a recommendation is safe - Kyverno does that at
-// admission time and writes the result to status.phase. This reconciler
-// just reacts to that decision: apply if Admitted, do nothing if Blocked.
+// Policy enforcement happens before this reconciler ever sees an object:
+// our Kyverno ClusterPolicy runs in Enforce mode with background: false,
+// which validates synchronously at admission time. A recommendation that
+// violates a guardrail never reaches etcd - the create request is rejected
+// outright. So by the time Reconcile observes an object, it has already
+// passed policy. See docs/adr/0001-recommendation-as-crd.md for the full
+// reasoning.
 type HomeostatRecommendationReconciler struct {
 	client.Client
 }
@@ -45,12 +49,29 @@ func (r *HomeostatRecommendationReconciler) Reconcile(ctx context.Context, req c
 		return r.applyToTarget(ctx, &rec)
 
 	case homeostatv1alpha1.PhaseBlocked:
+		// Kept for forward compatibility: a future background/audit-mode
+		// policy could conceivably flag an already-created object as
+		// Blocked after the fact, even though our current Enforce-mode
+		// policy never allows that state to occur today.
 		logger.Info("recommendation blocked, skipping", "target", rec.Spec.Target.Name, "reason", rec.Status.Message)
 		return ctrl.Result{}, nil
 
-	default:
-		// Pending / unset - admission hasn't run yet, nothing to do.
+	case homeostatv1alpha1.PhaseApplied, homeostatv1alpha1.PhaseFailed:
+		// Terminal states, nothing left to do.
 		return ctrl.Result{}, nil
+
+	default:
+		// Pending / unset. The object's existence already means it passed
+		// Kyverno's Enforce-mode admission check - see the type comment
+		// above. Mark it Admitted and requeue so the Admitted branch
+		// picks it up on the next reconcile.
+		logger.Info("recommendation passed admission, marking Admitted", "target", rec.Spec.Target.Name)
+		rec.Status.Phase = homeostatv1alpha1.PhaseAdmitted
+		rec.Status.Message = "admitted at creation time by Kyverno Enforce policy"
+		if err := r.Status().Update(ctx, &rec); err != nil {
+			return ctrl.Result{}, fmt.Errorf("updating status to Admitted: %w", err)
+		}
+		return ctrl.Result{Requeue: true}, nil
 	}
 }
 
