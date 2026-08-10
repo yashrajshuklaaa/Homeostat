@@ -9,8 +9,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	homeostatv1alpha1 "github.com/YOUR_USERNAME/homeostat/api/v1alpha1"
-	"github.com/YOUR_USERNAME/homeostat/internal/controller"
+	homeostatv1alpha1 "github.com/yashrajshuklaaa/homeostat/api/v1alpha1"
+	"github.com/yashrajshuklaaa/homeostat/internal/controller"
 )
 
 var scheme = runtime.NewScheme()

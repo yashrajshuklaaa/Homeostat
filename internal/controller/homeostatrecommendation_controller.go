@@ -9,7 +9,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	homeostatv1alpha1 "github.com/YOUR_USERNAME/homeostat/api/v1alpha1"
+	homeostatv1alpha1 "github.com/yashrajshuklaaa/homeostat/api/v1alpha1"
 )
 
 // HomeostatRecommendationReconciler watches HomeostatRecommendation objects.
