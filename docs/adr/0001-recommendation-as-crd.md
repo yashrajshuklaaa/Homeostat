@@ -1,7 +1,7 @@
 # ADR 0001: Recommendations are staged as a CRD, not applied directly
 
 ## Status
-Accepted (implementation in progress - see "Open question" below)
+Accepted
 
 ## Context
 
@@ -33,30 +33,38 @@ workload.
   Deployments, HPAs, or VPAs - only to HomeostatRecommendation objects.
   That's a meaningfully smaller blast radius if the agent misbehaves.
 
-## Open question
+## How admission reaches the controller
 
-Kyverno's ValidatingPolicy runs at admission time (on create/update of the
-HomeostatRecommendation itself) - it can reject the object outright, but
-today nothing writes the *admitted* case back onto `status.phase`. Our
-reconciler currently assumes something else already set `Admitted` or
-`Blocked`.
+Our Kyverno ClusterPolicy (`policies/max-rightsize-delta.yaml`) runs with
+`validationFailureAction: Enforce` and `background: false`. That means
+validation happens synchronously at admission time, before the object is
+persisted to etcd. A recommendation that violates a guardrail is rejected
+at the API server - it never becomes a stored object.
 
-Two ways to close this gap, still being evaluated:
+This has a useful consequence: the reconciler doesn't need a webhook or any
+other mechanism to learn "did this pass policy?" - if `Reconcile` observes
+an object at all, it already passed. On first reconcile of a freshly
+created recommendation (phase unset), the controller marks it `Admitted`
+directly and requeues, rather than waiting on an external signal.
 
-1. A small mutating/validating webhook that runs after Kyverno, translating
-   "admission succeeded" into `status.phase = Admitted` on create.
-2. Skip Kyverno's admission-time blocking model entirely and instead have
-   our own controller call out to Kyverno's policy engine as a library at
-   reconcile time, setting status itself based on the result.
+This was originally left as an open question (see prior revision of this
+ADR) while we considered building an admission webhook to bridge Kyverno's
+decision into `status.phase`. That turned out to be unnecessary complexity
+- Enforce-mode Kyverno already gates creation synchronously, so existence
+is proof of admission.
 
-Leaning toward (1) since it keeps Kyverno as the actual policy authority
-rather than duplicating its logic in our controller. Tracked as the next
-implementation task.
+The `Blocked` phase is retained in the type for forward compatibility, in
+case a future policy runs in Audit/background mode and needs to flag an
+already-created object after the fact - but no current policy produces
+that state.
 
 ## Consequences
 
 - One extra hop (propose -> validate -> apply) versus a direct patch.
   Slightly more latency, meaningfully more safety and auditability.
-- The controller must handle a Blocked recommendation gracefully (no-op,
-  not a crash) - this is already covered by
-  `TestReconcile_BlockedDoesNothing`.
+- No webhook infrastructure needed - fewer moving parts, no cert
+  management, one less thing to operate.
+- The `Blocked` phase exists but is currently unreachable in practice given
+  our only policy runs in Enforce mode. `TestReconcile_BlockedDoesNothing`
+  still covers it directly at the reconciler level, independent of how a
+  future policy might set it.
