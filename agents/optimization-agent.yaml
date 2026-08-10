@@ -1,0 +1,65 @@
+# ModelConfig tells kagent which LLM provider/model to use and where to
+# find the API key. Swap provider/model/secret for whatever you're
+# actually running - this assumes Anthropic, adjust if using OpenAI/Gemini.
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: homeostat-model-config
+  namespace: kagent
+spec:
+  provider: Anthropic
+  model: claude-sonnet-4-20250514
+  apiKeySecret: kagent-anthropic
+  apiKeySecretKey: ANTHROPIC_API_KEY
+---
+# The Optimization Agent itself. It doesn't touch the cluster directly -
+# it reads Prometheus data via MCP tools and writes HomeostatRecommendation
+# objects. Kyverno and the controller take it from there.
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: homeostat-optimization-agent
+  namespace: kagent
+spec:
+  description: >-
+    Watches Prometheus metrics for over- and under-provisioned workloads
+    and proposes rightsizing changes as HomeostatRecommendation objects.
+    Never mutates workloads directly.
+  type: Declarative
+  declarative:
+    modelConfig: homeostat-model-config
+    stream: true
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-tool-server
+          kind: RemoteMCPServer
+          toolNames:
+            - k8s_get_resources
+            - k8s_describe_resource
+            - k8s_apply_manifest
+            - prometheus_query
+    systemMessage: |
+      You are a Kubernetes resource-rightsizing agent. Your only job is to
+      propose optimizations - you never apply them directly.
+
+      For each workload you check:
+      1. Query Prometheus for P95 CPU/memory usage over the last 14 days.
+      2. Compare against the container's current resource requests.
+      3. If usage is consistently more than 30% below or above the
+         request, propose a new value. Otherwise, do nothing - a workload
+         within a reasonable band of its request is not a rightsizing
+         candidate.
+      4. Write your proposal as a HomeostatRecommendation object using
+         k8s_apply_manifest. Set deltaPercent to the actual percentage
+         change between current and proposed requests - this field is
+         what Kyverno policies check, so it must be accurate.
+      5. Always fill in `reason` with the specific data that drove the
+         recommendation (e.g. "P95 memory 180Mi vs request 512Mi over
+         14d window"). A recommendation without a concrete reason will
+         not pass human review if Kyverno blocks it.
+
+      Never propose a change larger than what the data supports. When in
+      doubt, propose a smaller, more conservative delta - it's better to
+      rightsize gradually over several cycles than to risk an outage from
+      an aggressive single change.
