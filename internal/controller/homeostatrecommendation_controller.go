@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -46,7 +47,7 @@ func (r *HomeostatRecommendationReconciler) Reconcile(ctx context.Context, req c
 	switch rec.Status.Phase {
 	case homeostatv1alpha1.PhaseAdmitted:
 		logger.Info("applying admitted recommendation", "target", rec.Spec.Target.Name, "agent", rec.Spec.AgentName)
-		return r.applyToTarget(ctx, &rec)
+		return r.applyToTarget(ctx, req.NamespacedName)
 
 	case homeostatv1alpha1.PhaseBlocked:
 		// Kept for forward compatibility: a future background/audit-mode
@@ -66,9 +67,10 @@ func (r *HomeostatRecommendationReconciler) Reconcile(ctx context.Context, req c
 		// above. Mark it Admitted and requeue so the Admitted branch
 		// picks it up on the next reconcile.
 		logger.Info("recommendation passed admission, marking Admitted", "target", rec.Spec.Target.Name)
-		rec.Status.Phase = homeostatv1alpha1.PhaseAdmitted
-		rec.Status.Message = "admitted at creation time by Kyverno Enforce policy"
-		if err := r.Status().Update(ctx, &rec); err != nil {
+		if err := r.updateStatus(ctx, req.NamespacedName, func(r *homeostatv1alpha1.HomeostatRecommendation) {
+			r.Status.Phase = homeostatv1alpha1.PhaseAdmitted
+			r.Status.Message = "admitted at creation time by Kyverno Enforce policy"
+		}); err != nil {
 			return ctrl.Result{}, fmt.Errorf("updating status to Admitted: %w", err)
 		}
 		return ctrl.Result{Requeue: true}, nil
@@ -79,23 +81,32 @@ func (r *HomeostatRecommendationReconciler) Reconcile(ctx context.Context, req c
 // with the admitted recommendation's proposed values, then flips the
 // recommendation's phase to Applied or Failed.
 //
+// It re-fetches the recommendation itself by name rather than taking a
+// pointer from the caller, since this function may run after a retry and
+// the caller's copy could be stale.
+//
 // NOTE: patches the Deployment directly for now rather than going through
 // VPA. Good enough to prove the pipeline end to end; VPA integration is
 // tracked on the roadmap.
 func (r *HomeostatRecommendationReconciler) applyToTarget(
 	ctx context.Context,
-	rec *homeostatv1alpha1.HomeostatRecommendation,
+	key types.NamespacedName,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
+	var rec homeostatv1alpha1.HomeostatRecommendation
+	if err := r.Get(ctx, key, &rec); err != nil {
+		return ctrl.Result{}, fmt.Errorf("re-fetching recommendation before apply: %w", err)
+	}
+
 	if rec.Spec.Target.Kind != "Deployment" {
-		return r.markFailed(ctx, rec, fmt.Sprintf("unsupported target kind %q, only Deployment is supported today", rec.Spec.Target.Kind))
+		return r.markFailed(ctx, key, fmt.Sprintf("unsupported target kind %q, only Deployment is supported today", rec.Spec.Target.Kind))
 	}
 
 	var dep appsv1.Deployment
-	key := types.NamespacedName{Name: rec.Spec.Target.Name, Namespace: rec.Spec.Target.Namespace}
-	if err := r.Get(ctx, key, &dep); err != nil {
-		return r.markFailed(ctx, rec, fmt.Sprintf("fetching target deployment: %v", err))
+	depKey := types.NamespacedName{Name: rec.Spec.Target.Name, Namespace: rec.Spec.Target.Namespace}
+	if err := r.Get(ctx, depKey, &dep); err != nil {
+		return r.markFailed(ctx, key, fmt.Sprintf("fetching target deployment: %v", err))
 	}
 
 	containers := dep.Spec.Template.Spec.Containers
@@ -116,17 +127,41 @@ func (r *HomeostatRecommendationReconciler) applyToTarget(
 	}
 
 	if applied == 0 {
-		return r.markFailed(ctx, rec, "no matching containers found on target deployment")
+		return r.markFailed(ctx, key, "no matching containers found on target deployment")
 	}
 
-	if err := r.Update(ctx, &dep); err != nil {
-		return r.markFailed(ctx, rec, fmt.Sprintf("patching deployment: %v", err))
+	// Deployment updates can hit the same resourceVersion race as status
+	// updates, so retry on conflict here too.
+	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest appsv1.Deployment
+		if err := r.Get(ctx, depKey, &latest); err != nil {
+			return err
+		}
+		for _, delta := range rec.Spec.ResourceDeltas {
+			for i := range latest.Spec.Template.Spec.Containers {
+				c := &latest.Spec.Template.Spec.Containers[i]
+				if c.Name != delta.Container {
+					continue
+				}
+				if c.Resources.Requests == nil {
+					c.Resources.Requests = corev1.ResourceList{}
+				}
+				for name, qty := range delta.ProposedRequests {
+					c.Resources.Requests[name] = qty
+				}
+			}
+		}
+		return r.Update(ctx, &latest)
+	})
+	if updateErr != nil {
+		return r.markFailed(ctx, key, fmt.Sprintf("patching deployment: %v", updateErr))
 	}
 
 	logger.Info("applied recommendation", "target", rec.Spec.Target.Name, "containersUpdated", applied)
-	rec.Status.Phase = homeostatv1alpha1.PhaseApplied
-	rec.Status.Message = fmt.Sprintf("patched %d container(s)", applied)
-	if err := r.Status().Update(ctx, rec); err != nil {
+	if err := r.updateStatus(ctx, key, func(r *homeostatv1alpha1.HomeostatRecommendation) {
+		r.Status.Phase = homeostatv1alpha1.PhaseApplied
+		r.Status.Message = fmt.Sprintf("patched %d container(s)", applied)
+	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status to Applied: %w", err)
 	}
 
@@ -134,18 +169,41 @@ func (r *HomeostatRecommendationReconciler) applyToTarget(
 }
 
 // markFailed sets the recommendation's phase to Failed with the given
-// message and persists it.
+// message and persists it, retrying on conflict.
 func (r *HomeostatRecommendationReconciler) markFailed(
 	ctx context.Context,
-	rec *homeostatv1alpha1.HomeostatRecommendation,
+	key types.NamespacedName,
 	msg string,
 ) (ctrl.Result, error) {
-	rec.Status.Phase = homeostatv1alpha1.PhaseFailed
-	rec.Status.Message = msg
-	if err := r.Status().Update(ctx, rec); err != nil {
+	if err := r.updateStatus(ctx, key, func(r *homeostatv1alpha1.HomeostatRecommendation) {
+		r.Status.Phase = homeostatv1alpha1.PhaseFailed
+		r.Status.Message = msg
+	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("updating status to Failed: %w", err)
 	}
 	return ctrl.Result{}, nil
+}
+
+// updateStatus re-fetches the recommendation and applies mutate, retrying
+// automatically on a resourceVersion conflict. This is the fix for a real
+// bug found during live cluster testing: two reconciles landing close
+// together could both read the same resourceVersion and race to write it,
+// with the second write failing with "the object has been modified".
+// RetryOnConflict re-fetches the latest copy before each retry, so the
+// second write applies cleanly on top of the first instead of erroring.
+func (r *HomeostatRecommendationReconciler) updateStatus(
+	ctx context.Context,
+	key types.NamespacedName,
+	mutate func(*homeostatv1alpha1.HomeostatRecommendation),
+) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var latest homeostatv1alpha1.HomeostatRecommendation
+		if err := r.Get(ctx, key, &latest); err != nil {
+			return err
+		}
+		mutate(&latest)
+		return r.Status().Update(ctx, &latest)
+	})
 }
 
 func (r *HomeostatRecommendationReconciler) SetupWithManager(mgr ctrl.Manager) error {

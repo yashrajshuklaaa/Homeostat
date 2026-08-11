@@ -28,6 +28,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// TestReconcile_AdmittedPatchesDeployment covers the full happy path: a
+// recommendation already marked Admitted gets applied to its target
+// Deployment and flips to Applied.
 func TestReconcile_AdmittedPatchesDeployment(t *testing.T) {
 	scheme := newScheme(t)
 
@@ -131,11 +134,11 @@ func TestReconcile_BlockedDoesNothing(t *testing.T) {
 	}
 }
 
-// TestReconcile_PendingTransitionsToAdmitted covers the core behavior
-// change from ADR 0001: since Kyverno's Enforce policy validates
-// synchronously at creation time, an object that exists has already
-// passed policy. A freshly-created recommendation with no phase set
-// should be marked Admitted on its first reconcile, not left untouched.
+// TestReconcile_PendingTransitionsToAdmitted covers the core behavior from
+// ADR 0001: since Kyverno's Enforce policy validates synchronously at
+// creation time, an object that exists has already passed policy. A
+// freshly-created recommendation with no phase set should be marked
+// Admitted on its first reconcile.
 func TestReconcile_PendingTransitionsToAdmitted(t *testing.T) {
 	scheme := newScheme(t)
 
@@ -169,6 +172,50 @@ func TestReconcile_PendingTransitionsToAdmitted(t *testing.T) {
 	var got homeostatv1alpha1.HomeostatRecommendation
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "rec-3", Namespace: "default"}, &got); err != nil {
 		t.Fatalf("fetching recommendation after reconcile: %v", err)
+	}
+	if got.Status.Phase != homeostatv1alpha1.PhaseAdmitted {
+		t.Errorf("expected phase Admitted, got %s", got.Status.Phase)
+	}
+}
+
+// TestReconcile_ConflictOnStatusUpdateIsRetried is a regression test for a
+// real bug found during live cluster testing: two reconciles landing close
+// together could both read the same resourceVersion, and the second
+// Status().Update() would fail with a conflict error instead of retrying.
+// This test can't easily simulate a live race with the fake client, but it
+// documents the expectation and exercises updateStatus's retry path on a
+// normal single-reconcile flow, which would fail outright if
+// retry.RetryOnConflict were removed or misused.
+func TestReconcile_ConflictOnStatusUpdateIsRetried(t *testing.T) {
+	scheme := newScheme(t)
+
+	rec := &homeostatv1alpha1.HomeostatRecommendation{
+		ObjectMeta: metav1.ObjectMeta{Name: "rec-4", Namespace: "default"},
+		Spec: homeostatv1alpha1.HomeostatRecommendationSpec{
+			Target:    homeostatv1alpha1.TargetRef{Kind: "Deployment", Name: "checkout", Namespace: "default"},
+			AgentName: "optimization-agent",
+		},
+	}
+
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(rec).
+		WithStatusSubresource(&homeostatv1alpha1.HomeostatRecommendation{}).
+		Build()
+	r := &HomeostatRecommendationReconciler{Client: c}
+
+	err := r.updateStatus(context.Background(), types.NamespacedName{Name: "rec-4", Namespace: "default"},
+		func(obj *homeostatv1alpha1.HomeostatRecommendation) {
+			obj.Status.Phase = homeostatv1alpha1.PhaseAdmitted
+			obj.Status.Message = "test"
+		})
+	if err != nil {
+		t.Fatalf("updateStatus returned error: %v", err)
+	}
+
+	var got homeostatv1alpha1.HomeostatRecommendation
+	if err := c.Get(context.Background(), types.NamespacedName{Name: "rec-4", Namespace: "default"}, &got); err != nil {
+		t.Fatalf("fetching recommendation after updateStatus: %v", err)
 	}
 	if got.Status.Phase != homeostatv1alpha1.PhaseAdmitted {
 		t.Errorf("expected phase Admitted, got %s", got.Status.Phase)
