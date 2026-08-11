@@ -81,3 +81,12 @@ yet; listed here so ambition and reality don't get confused.
   reasoning kept so it isn't re-proposed without context.
 - **Vision** = direction, not commitment. Items move to Next when there's
   an actual design, not just an idea.
+
+## Found during live testing (not yet fixed)
+
+- The reconciler currently reprocesses the same recommendation multiple
+  times per logical change (status updates trigger new watch events,
+  which re-trigger Reconcile). Harmless today since apply is idempotent,
+  but wasteful. Fix: check `status.observedGeneration` against
+  `metadata.generation` at the top of Reconcile and skip if already
+  processed - the field already exists on the type, just unused.
