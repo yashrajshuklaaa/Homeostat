@@ -90,3 +90,41 @@ yet; listed here so ambition and reality don't get confused.
   but wasteful. Fix: check `status.observedGeneration` against
   `metadata.generation` at the top of Reconcile and skip if already
   processed - the field already exists on the type, just unused.
+
+## Real gaps identified in review (worth fixing, in priority order)
+
+These came from actually re-reading the architecture against what's built,
+not from feature-comparison against other products. Each one is something
+we designed for but never verified or finished.
+
+1. **kagent has never actually produced a recommendation.** Every test so
+   far used a hand-written CRD. The agent spec exists but the real loop -
+   agent reasons over metrics, calls its own tool, writes a
+   HomeostatRecommendation - has never run. This is the actual claim of
+   the project and it's currently unverified. Highest priority.
+2. **Direct Deployment patching should become VPA integration.** Patching
+   a Deployment's containers directly restarts pods with no PDB-awareness.
+   Writing to a VerticalPodAutoscaler instead lets VPA's mature eviction
+   logic handle the actual rollout safely. This was the original intent,
+   simplified for MVP speed - worth reinstating.
+3. **No Kubernetes Events on the reconciler.** Cheap fix, real value:
+   `kubectl get events` currently shows nothing, so debugging why a
+   recommendation was applied or failed means reading controller logs.
+4. **README overclaims "native autoscaling (HPA/VPA/Cluster Autoscaler)"
+   integration that doesn't exist yet** - only direct Deployment patching
+   is implemented today. Needs a two-line honesty fix independent of when
+   #2 actually lands.
+
+## Explicitly not adopted from external review
+
+A review pass also proposed a metrics collector, a Go-native
+recommendation engine, a background scanner, automatic rollback,
+Prometheus savings dashboards, a Helm chart, and a competitive
+positioning strategy against five funded companies - all framed as
+immediate priorities.
+
+None of that is adopted. It's not that these ideas are bad in the
+abstract - some may become real Vision items later - but treating a
+solo project's next five commits as "ship a CAST AI competitor" is how
+small open-source tools die unfinished. The plan stays: small, honest,
+one real gap at a time, verified on a real cluster before moving on.
